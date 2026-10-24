@@ -1,0 +1,8 @@
+node_modules/
+dist/
+dist-electron/
+python/.venv/
+python/__pycache__/
+*.log
+.DS_Store
+.workbuddy-ai/
