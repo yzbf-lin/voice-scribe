@@ -29,16 +29,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both mac architectures build on one Apple Silicon runner.
+          # macos-13 (the only Intel image) queues for tens of minutes or not at
+          # all now that GitHub is retiring it, so cross-building x64 from arm64
+          # is the reliable path: scripts/prepare-platform-deps.js fetches the
+          # x64 ffmpeg and whisper binding, after-pack swaps them in.
           - os: macos-14
-            label: macOS arm64 (Apple Silicon)
+            label: macOS (arm64 + x64)
             platform: mac
-            arch: arm64
-            artifact: mac-arm64
-          - os: macos-13
-            label: macOS x64 (Intel)
-            platform: mac
-            arch: x64
-            artifact: mac-x64
+            arch: ""
+            artifact: mac
           - os: windows-latest
             label: Windows x64
             platform: win
@@ -59,6 +59,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Only needed for cross-built targets (macOS x64 on an arm64 runner).
+      - name: Fetch cross-target native deps
+        if: matrix.platform == 'mac'
+        run: node scripts/prepare-platform-deps.js darwin-arm64 darwin-x64
+
       - name: Build renderer
         run: npm run build
 
@@ -66,10 +71,20 @@ jobs:
       # installers are unsigned by design. macOS artifacts are ad-hoc signed by
       # electron-builder, so users must clear the quarantine flag once (documented
       # in the release notes).
-      - name: Package (${{ matrix.platform }} ${{ matrix.arch }})
-        run: npx electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+      #
+      # Split into two steps rather than interpolating an optional --arch flag:
+      # for macOS the arch is deliberately empty so electron-builder's own target
+      # list (arm64 + x64) decides what gets built.
+      - name: Package (macOS, both arches)
+        if: matrix.platform == 'mac'
+        run: npx electron-builder --mac --publish never
         env:
-          # Skip the automatic update feed and code signing lookups.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Package (Windows x64)
+        if: matrix.platform == 'win'
+        run: npx electron-builder --win --x64 --publish never
+        env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - name: List artifacts
@@ -100,6 +115,14 @@ jobs:
       - name: Show collected files
         run: ls -lh artifacts/
 
+      # Fail loudly if a platform produced nothing, rather than publishing a
+      # release that silently only covers one OS.
+      - name: Check artifacts
+        run: |
+          test -n "$(ls artifacts/*.dmg 2>/dev/null)" || { echo "no macOS dmg"; exit 1; }
+          test -n "$(ls artifacts/*.exe 2>/dev/null)" || { echo "no Windows installer"; exit 1; }
+          echo "ok"
+
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
@@ -114,8 +137,10 @@ jobs:
             | 平台 | 文件 |
             | --- | --- |
             | macOS (Apple Silicon) | `VoiceScribe-0.1.0-arm64.dmg` |
-            | macOS (Intel) | `VoiceScribe-0.1.0-x64.dmg` |
+            | macOS (Intel) | `VoiceScribe-0.1.0.dmg` |
             | Windows x64 | `VoiceScribe Setup 0.1.0.exe` |
+
+            `*.zip` 是同一份 App 的压缩包，免安装，解压即用。
 
             ### 首次打开（未签名构建）
             这些安装包没有代码签名证书，系统会提示"无法验证开发者"。

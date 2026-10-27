@@ -91,11 +91,15 @@ npm start
 ## 打包与发布
 
 安装包由 GitHub Actions 在**各自的系统上**构建（`.github/workflows/release.yml`）：
-macOS 用 `macos-14` / `macos-13`，Windows 用 `windows-latest`。
+macOS 用 `macos-14`，Windows 用 `windows-latest`。
 
 之所以不在本机跨平台编译：`@fugood/node-whisper-*` 和 `ffmpeg-static` 都是**按宿主平台**
 在 `npm install` 时下载的原生二进制，一台 Mac 上装不到 Windows 的 `.node` 和 `ffmpeg.exe`。
-交给原生 runner，`npm ci` 装出来的就是对的，不需要任何交叉替换。
+交给原生 runner，`npm ci` 装出来的就是对的。
+
+macOS 的两个架构都在这台 arm64 runner 上产出：x64 那一份由
+`scripts/prepare-platform-deps.js` 补下 x64 的 ffmpeg 与 whisper 绑定，`after-pack` 再换进去。
+（`macos-13` 是唯一的 Intel 镜像，现在排队几十分钟也未必能分到，已不再使用。）
 
 ```bash
 # 打 tag 即触发：构建 → 上传产物 → 汇总发布 Release
