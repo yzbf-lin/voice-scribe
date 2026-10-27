@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "project": "voice-scribe",
+  "groups": ["desktop"],
+  "services": [
+    {
+      "name": "voice-scribe",
+      "group": "desktop",
+      "command": "npm run dev:nosandbox",
+      "cwd": ".",
+      "env": {
+        "VITE_PORT": "5180",
+        "VS_NO_SANDBOX": "1"
+      },
+      "auto_start": false,
+      "stop_timeout": 10
+    },
+    {
+      "name": "voice-scribe-renderer",
+      "group": "desktop",
+      "command": "npm run dev:renderer",
+      "cwd": ".",
+      "env": {
+        "VITE_PORT": "5180"
+      },
+      "auto_start": false,
+      "stop_timeout": 10
+    },
+    {
+      "name": "voice-scribe-prod",
+      "group": "desktop",
+      "command": "npm start",
+      "cwd": ".",
+      "env": {
+        "VS_NO_SANDBOX": "1"
+      },
+      "auto_start": false,
+      "stop_timeout": 15
+    }
+  ]
+}

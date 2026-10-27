@@ -1,0 +1,132 @@
+name: Release
+
+# Build installers on native runners and attach them to a GitHub Release.
+#
+# Cross-compiling from one laptop cannot produce a trustworthy Windows build: the
+# native whisper binding and ffmpeg are platform binaries that npm only installs
+# for the host. Each job below therefore runs on the OS it targets, and the
+# publish job collects everything into a single release.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: "Create the release as a draft"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            label: macOS arm64 (Apple Silicon)
+            platform: mac
+            arch: arm64
+            artifact: mac-arm64
+          - os: macos-13
+            label: macOS x64 (Intel)
+            platform: mac
+            arch: x64
+            artifact: mac-x64
+          - os: windows-latest
+            label: Windows x64
+            platform: win
+            arch: x64
+            artifact: win-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm ci` installs the optional dependency for this runner's OS/arch only,
+      # which is exactly what we want: the native whisper binding and ffmpeg
+      # match the target by construction.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build renderer
+        run: npm run build
+
+      # Unsigned builds: no Developer ID certificate is available, and Windows
+      # installers are unsigned by design. macOS artifacts are ad-hoc signed by
+      # electron-builder, so users must clear the quarantine flag once (documented
+      # in the release notes).
+      - name: Package (${{ matrix.platform }} ${{ matrix.arch }})
+        run: npx electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+        env:
+          # Skip the automatic update feed and code signing lookups.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: List artifacts
+        shell: bash
+        run: ls -lh release/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Show collected files
+        run: ls -lh artifacts/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          draft: false
+          generate_release_notes: true
+          body: |
+            ## VoiceScribe 0.1.0
+
+            本地离线的音视频转文字工具，基于 whisper.cpp，无需 Python、无需联网转写。
+
+            ### 下载
+            | 平台 | 文件 |
+            | --- | --- |
+            | macOS (Apple Silicon) | `VoiceScribe-0.1.0-arm64.dmg` |
+            | macOS (Intel) | `VoiceScribe-0.1.0-x64.dmg` |
+            | Windows x64 | `VoiceScribe Setup 0.1.0.exe` |
+
+            ### 首次打开（未签名构建）
+            这些安装包没有代码签名证书，系统会提示"无法验证开发者"。
+
+            **macOS**：把 App 拖进"应用程序"后执行一次
+            ```bash
+            xattr -dr com.apple.quarantine /Applications/VoiceScribe.app
+            ```
+
+            **Windows**：SmartScreen 提示时点"更多信息"→"仍要运行"。
+
+            ### 首次使用
+            应用内会自动下载 Whisper 模型（`small` 约 465 MB，`large-v3` 约 2.9 GB），
+            支持暂停和断点续传，下载完成后即可完全离线使用。

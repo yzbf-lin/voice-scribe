@@ -316,7 +316,9 @@ export function Transcript() {
             <Loader2 className="size-5 animate-spin text-brand" />
             <p className="text-center text-[0.78rem] text-muted-foreground">
               {file.stage === "downloading"
-                ? `正在下载 ${modelLabel(file.model ?? "")} 模型 · 首次使用需先获取权重`
+                ? download?.paused
+                  ? `已暂停下载 ${modelLabel(file.model ?? "")} 模型 · 在顶栏模型面板点「继续」恢复`
+                  : `正在下载 ${modelLabel(file.model ?? "")} 模型 · 首次使用需先获取权重`
                 : file.stage === "loading"
                   ? "正在加载 Whisper 模型…"
                   : file.stage === "decoding"
@@ -333,7 +335,13 @@ export function Transcript() {
                   </span>
                   <span>
                     {Math.round((download.percent ?? 0) * 100)}%
-                    {download.speed ? ` · ${formatBytes(download.speed)}/s` : ""}
+                    {download.paused
+                      ? " · 已暂停"
+                      : download.speed
+                        ? ` · ${formatBytes(download.speed)}/s${
+                            download.etaSeconds ? ` · 剩余 ${formatClock(download.etaSeconds)}` : ""
+                          }`
+                        : ""}
                   </span>
                 </div>
               </div>

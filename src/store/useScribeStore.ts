@@ -63,6 +63,7 @@ interface ScribeState {
 
   refreshModels: () => Promise<void>;
   downloadModel: (model: string) => Promise<void>;
+  pauseDownload: (model: string) => Promise<void>;
   handleModelEvent: (event: ModelEvent) => void;
 
   addPaths: (paths: string[], labels?: (string | undefined)[]) => Promise<void>;
@@ -165,6 +166,12 @@ export const useScribeStore = create<ScribeState>((set, get) => ({
       get().pushToast({ title: "无法开始下载", description: result.error || "引擎未就绪", variant: "error" });
       return;
     }
+    // Clear a previous failure so the row shows the live progress again.
+    set((state) => {
+      const modelErrors = { ...state.modelErrors };
+      delete modelErrors[model];
+      return { modelErrors };
+    });
     set((state) => ({
       downloads: {
         ...state.downloads,
@@ -172,6 +179,21 @@ export const useScribeStore = create<ScribeState>((set, get) => ({
       },
       modelErrors: Object.fromEntries(Object.entries(state.modelErrors).filter(([key]) => key !== model)),
     }));
+  },
+
+  pauseDownload: async (model) => {
+    const result = await window.voiceScribe.pauseDownload(model);
+    if (!result.ok) {
+      get().pushToast({ title: "无法暂停下载", description: result.error || "引擎未就绪", variant: "error" });
+      return;
+    }
+    // Mark it paused right away; the engine's own model:paused event confirms
+    // it with the exact byte count once the socket has been released.
+    set((state) => {
+      const current = state.downloads[model];
+      if (!current) return {};
+      return { downloads: { ...state.downloads, [model]: { ...current, speed: 0, paused: true } } };
+    });
   },
 
   handleModelEvent: (event) => {    switch (event.type) {
@@ -184,10 +206,35 @@ export const useScribeStore = create<ScribeState>((set, get) => ({
         break;
       }
       case "model:start":
+        set((state) => {
+          // Resuming keeps the bytes already on disk, so don't reset to zero —
+          // the engine reports the real offset, which is also right after a
+          // restart where the store has no previous entry.
+          const previous = state.downloads[event.model];
+          return {
+            downloads: {
+              ...state.downloads,
+              [event.model]: {
+                downloaded: event.downloaded ?? previous?.downloaded ?? 0,
+                total: event.total,
+                percent: event.percent ?? previous?.percent ?? 0,
+                speed: 0,
+              },
+            },
+          };
+        });
+        break;
+      case "model:paused":
         set((state) => ({
           downloads: {
             ...state.downloads,
-            [event.model]: { downloaded: 0, total: event.total, percent: 0, speed: 0 },
+            [event.model]: {
+              downloaded: event.downloaded,
+              total: event.total,
+              percent: event.percent,
+              speed: 0,
+              paused: true,
+            },
           },
         }));
         break;
@@ -200,6 +247,7 @@ export const useScribeStore = create<ScribeState>((set, get) => ({
               total: event.total,
               percent: event.percent,
               speed: event.speed,
+              etaSeconds: event.etaSeconds ?? null,
               startedAt: event.startedAt,
             },
           },

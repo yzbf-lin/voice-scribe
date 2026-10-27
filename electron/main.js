@@ -1,9 +1,7 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
-const { spawn } = require("node:child_process");
+const { app, BrowserWindow, ipcMain, dialog, shell, utilityProcess } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const crypto = require("node:crypto");
-const readline = require("node:readline");
 
 const isDev = process.env.NODE_ENV === "development";
 const ROOT = path.join(__dirname, "..");
@@ -13,33 +11,50 @@ let worker = null;
 let workerReady = false;
 let nextRequestId = 1;
 const pending = new Map(); // requestId -> { resolve, reject, onEvent }
-let modelSnapshot = null; // last "models" payload from the worker
+let modelSnapshot = null; // last "models" payload from the engine
+let engineCrashed = false; // engine died without being asked to stop
+let quitting = false;
+let engineRestarts = 0; // consecutive automatic restarts after a crash
+let engineStartedAt = 0;
 
 /* ------------------------------------------------------------------ */
-/* Python worker lifecycle                                             */
+/* Engine lifecycle (whisper.cpp in a utility process)                 */
 /* ------------------------------------------------------------------ */
 
-function resolvePython() {
-  const candidates = [
-    process.env.VOICESCRIBE_PYTHON,
-    path.join(ROOT, "python", ".venv", "bin", "python"),
-    path.join(ROOT, "python", ".venv", "bin", "python3"),
-  ].filter(Boolean);
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return null;
+/**
+ * Path to the engine entry point, plus the NODE_PATH it needs.
+ *
+ * utilityProcess.fork needs a real file on disk: a path inside app.asar is not
+ * spawnable (ENOTDIR), which leaves the packaged app stuck on "引擎启动中"
+ * forever. electron-builder unpacks electron/engine next to the archive, but
+ * Node then resolves modules from that directory upwards and never looks inside
+ * app.asar — so `require("@fugood/whisper.node")` fails. Pointing NODE_PATH at
+ * the archive's node_modules bridges the two.
+ */
+function engineEntry() {
+  const inAsar = path.join(__dirname, "engine", "worker.js");
+  const unpacked = inAsar.replace(`app.asar${path.sep}`, `app.asar.unpacked${path.sep}`);
+  return fs.existsSync(unpacked) ? unpacked : inAsar;
 }
 
-function pythonStatus() {
-  const bin = resolvePython();
+function engineNodePath() {
+  const entry = engineEntry();
+  const marker = `app.asar.unpacked${path.sep}`;
+  if (!entry.includes(marker)) return null;
+  const resources = entry.slice(0, entry.indexOf(marker));
+  return path.join(resources, "app.asar", "node_modules");
+}
+
+function engineStatus() {
   return {
-    available: Boolean(bin),
-    path: bin,
+    available: !engineCrashed,
+    path: worker ? engineEntry() : null,
     workerReady,
-    hint: bin
-      ? null
-      : "未找到 Python 运行环境，请在项目根目录执行 npm run setup:python",
+    hint: engineCrashed
+      ? "本地转录引擎意外退出，正在尝试自动恢复；仍不行请重启应用"
+      : workerReady
+        ? null
+        : "本地引擎启动中，请稍候",
   };
 }
 
@@ -49,33 +64,40 @@ function sendToRenderer(channel, payload) {
   }
 }
 
-function startWorker() {
-  const bin = resolvePython();
-  if (!bin) {
-    sendToRenderer("worker:status", pythonStatus());
-    return;
+function engineMessage(payload) {
+  try {
+    worker?.postMessage(payload);
+  } catch {
+    /* engine already gone; the exit handler reports it */
   }
+}
 
-  const script = path.join(ROOT, "python", "worker.py");
-  worker = spawn(bin, ["-u", script], {
-    cwd: ROOT,
-    stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, PYTHONUNBUFFERED: "1", HF_HUB_DISABLE_TELEMETRY: "1" },
+function startWorker() {
+  engineCrashed = false;
+  // window-all-closed sets this; a fresh start has to clear it or every later
+  // crash would be silently ignored.
+  quitting = false;
+  engineStartedAt = Date.now();
+  // Inference runs off the main process: loading a model blocks its JS thread
+  // for seconds and a native crash would otherwise take the window with it.
+  const nodePath = engineNodePath();
+  worker = utilityProcess.fork(engineEntry(), [], {
+    stdio: "pipe",
+    serviceName: "VoiceScribe 引擎",
+    env: {
+      ...process.env,
+      // The engine prepends this to its module search path. NODE_PATH alone is
+      // not enough: Electron's utility process ignores it.
+      ...(nodePath ? { VS_ENGINE_MODULES: nodePath } : {}),
+    },
   });
 
-  const rl = readline.createInterface({ input: worker.stdout });
-  rl.on("line", (line) => {
-    let msg;
-    try {
-      msg = JSON.parse(line);
-    } catch {
-      return;
-    }
+  worker.on("message", (msg) => {
+    if (!msg || typeof msg !== "object") return;
     if (msg.type === "ready") {
       workerReady = true;
-      sendToRenderer("worker:status", pythonStatus());
-      // Push a fresh model inventory as soon as the engine is up.
-      worker.stdin.write(JSON.stringify({ cmd: "models" }) + "\n");
+      sendToRenderer("worker:status", engineStatus());
+      engineMessage({ cmd: "models" });
       return;
     }
     // Model inventory / download progress is broadcast, not tied to a request.
@@ -90,9 +112,18 @@ function startWorker() {
     else sendToRenderer("worker:event", msg);
   });
 
-  worker.stderr.on("data", (chunk) => {
+  worker.stderr?.on("data", (chunk) => {
     const text = chunk.toString();
-    if (isDev) process.stderr.write(text);
+    // Packaged builds have no terminal, so a silent engine failure is
+    // undebuggable; VS_ENGINE_DEBUG=1 surfaces it on stderr.
+    if (isDev || process.env.VS_ENGINE_DEBUG === "1") process.stderr.write(text);
+    sendToRenderer("worker:log", text);
+  });
+  worker.stdout?.on("data", (chunk) => {
+    const text = chunk.toString();
+    // Packaged builds have no terminal, so a silent engine failure is
+    // undebuggable; VS_ENGINE_DEBUG=1 surfaces it on stderr.
+    if (isDev || process.env.VS_ENGINE_DEBUG === "1") process.stderr.write(text);
     sendToRenderer("worker:log", text);
   });
 
@@ -100,25 +131,52 @@ function startWorker() {
     workerReady = false;
     worker = null;
     modelSnapshot = null;
+    const lived = Date.now() - engineStartedAt;
+    // A non-zero exit nobody asked for means the native side died. Without a
+    // restart the badge would stay on "引擎缺失" until the app is relaunched,
+    // even though everything the engine needs (models, ffmpeg) is still fine.
+    if (!quitting && code !== 0) {
+      engineCrashed = true;
+      console.error(`[engine] exited with code ${code} after ${(lived / 1000).toFixed(1)}s`);
+    }
     for (const [, entry] of pending) {
       entry.onEvent({ type: "error", message: `转录进程已退出 (code ${code})` });
     }
     pending.clear();
-    sendToRenderer("worker:status", pythonStatus());
+    sendToRenderer("worker:status", engineStatus());
+
+    if (quitting) return;
+    // Reset the budget when the engine had been healthy for a while, so a rare
+    // crash never exhausts the retries for the whole session.
+    if (lived > 30000) engineRestarts = 0;
+    if (engineRestarts >= 3) {
+      console.error("[engine] giving up after 3 restarts");
+      return;
+    }
+    engineRestarts += 1;
+    setTimeout(() => {
+      if (!quitting && !worker) {
+        console.error(`[engine] restarting (attempt ${engineRestarts})`);
+        startWorker();
+      }
+    }, 600 * engineRestarts);
   });
 
-  sendToRenderer("worker:status", pythonStatus());
+  engineMessage({ cmd: "init", userDataPath: app.getPath("userData") });
+  sendToRenderer("worker:status", engineStatus());
 }
 
 function stopWorker() {
-  if (worker) {
-    try {
-      worker.stdin.write(JSON.stringify({ cmd: "shutdown" }) + "\n");
-    } catch {
-      /* ignore */
-    }
-    setTimeout(() => worker && worker.kill(), 800);
+  quitting = true;
+  if (!worker) return;
+  const child = worker;
+  worker = null;
+  try {
+    child.postMessage({ cmd: "shutdown" });
+  } catch {
+    /* ignore */
   }
+  setTimeout(() => child.kill(), 800);
 }
 
 /* ------------------------------------------------------------------ */
@@ -146,9 +204,56 @@ function createWindow() {
   mainWindow.once("ready-to-show", () => mainWindow.show());
 
   if (isDev) {
-    mainWindow.loadURL("http://localhost:5173");
+    // Keep in sync with VITE_PORT in vite.config.ts; the default avoids 5173,
+    // which other local projects commonly occupy.
+    mainWindow.loadURL(`http://localhost:${process.env.VITE_PORT || 5180}`);
   } else {
     mainWindow.loadFile(path.join(ROOT, "dist", "index.html"));
+  }
+
+  // Dev-only: drive the UI before the screenshot. VS_CLICK holds one or more
+  // steps separated by "|", each "spec@delayMs": a CSS selector, or
+  // "text=导出文本" to click the first button/menuitem containing that text.
+  // Smoke tests use it to exercise cancel/export without a human at the keyboard.
+  if (process.env.VS_CLICK) {
+    const steps = process.env.VS_CLICK.split("|").map((raw) => {
+      const [spec, delay] = raw.trim().split("@");
+      return { spec, delay: Number(delay || 5000) };
+    });
+    mainWindow.webContents.once("did-finish-load", () => {
+      for (const step of steps) {
+        setTimeout(() => {
+          mainWindow.webContents
+            .executeJavaScript(
+              `(() => {
+                 const spec = ${JSON.stringify(step.spec)};
+                 let el = null;
+                 if (spec.startsWith("text=")) {
+                   const wanted = spec.slice(5);
+                   const nodes = [...document.querySelectorAll('button, [role="menuitem"], [role="tab"], a')];
+                   el = nodes.find((n) => (n.textContent || "").includes(wanted)) || null;
+                 } else {
+                   el = document.querySelector(spec);
+                 }
+                 if (!el) return false;
+                 // Radix menus open on pointerdown, so a bare .click() is not
+                 // enough; replay the whole pointer sequence.
+                 const rect = el.getBoundingClientRect();
+                 const base = { bubbles: true, cancelable: true, composed: true, button: 0, isPrimary: true,
+                                clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+                 el.dispatchEvent(new PointerEvent("pointerdown", { ...base, pointerId: 1, pointerType: "mouse" }));
+                 el.dispatchEvent(new MouseEvent("mousedown", base));
+                 el.dispatchEvent(new PointerEvent("pointerup", { ...base, pointerId: 1, pointerType: "mouse" }));
+                 el.dispatchEvent(new MouseEvent("mouseup", base));
+                 el.click();
+                 return true;
+               })()`
+            )
+            .then((ok) => console.log("[click]", step.spec, ok ? "ok" : "not found"))
+            .catch((error) => console.error("[click] failed", error.message));
+        }, step.delay);
+      }
+    });
   }
 
   // Dev-only: headless screenshot helper (VS_CAPTURE=/path/out.png)
@@ -191,11 +296,19 @@ app.whenReady().then(() => {
   createWindow();
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+      // macOS keeps the app alive with no windows; the engine was stopped by
+      // window-all-closed, so it has to come back with the window or the badge
+      // would read "引擎缺失" on a perfectly healthy app.
+      if (!worker) startWorker();
+    }
   });
 });
 
 app.on("window-all-closed", () => {
+  // Stopping here frees the model/Metal memory while no window is open; the
+  // engine is started again on "activate" (macOS) or on the next launch.
   stopWorker();
   if (process.platform !== "darwin") app.quit();
 });
@@ -220,7 +333,7 @@ ipcMain.handle("chat:read", async (_event, filePath) => {
 });
 
 // Voice notes live on the local chatlog server; we copy them into the temp dir
-// so the Python worker can decode them like any other audio file.
+// so the engine can decode them like any other audio file.
 ipcMain.handle("chat:fetchVoice", async (_event, { url, key }) => {
   try {
     const parsed = new URL(String(url));
@@ -245,11 +358,21 @@ ipcMain.handle("chat:fetchVoice", async (_event, { url, key }) => {
   }
 });
 
+/**
+ * Start the engine if it is not running. Every engine-dependent handler calls
+ * this first, so a crashed (or never-started) engine recovers on the next user
+ * action instead of leaving the UI stuck on "引擎缺失".
+ */
+function ensureEngine() {
+  if (!worker) startWorker();
+  return worker;
+}
+
 /* ------------------------------------------------------------------ */
 /* IPC                                                                 */
 /* ------------------------------------------------------------------ */
 
-ipcMain.handle("worker:status", () => pythonStatus());
+ipcMain.handle("worker:status", () => engineStatus());
 
 ipcMain.handle("dialog:openMedia", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -265,6 +388,7 @@ ipcMain.handle("dialog:openMedia", async () => {
 });
 
 ipcMain.handle("media:probe", async (_event, filePath) => {
+  ensureEngine();
   if (!worker || !workerReady) return { ok: false, error: "转录引擎未就绪" };
   const id = nextRequestId++;
   return new Promise((resolve) => {
@@ -285,27 +409,37 @@ ipcMain.handle("media:probe", async (_event, filePath) => {
         }
       },
     });
-    worker.stdin.write(JSON.stringify({ cmd: "probe", id, file: filePath }) + "\n");
+    engineMessage({ cmd: "probe", id, file: filePath });
   });
 });
 
 ipcMain.handle("models:list", async () => {
+  ensureEngine();
   if (!worker || !workerReady) {
     return { ok: false, error: "转录引擎未就绪", snapshot: modelSnapshot };
   }
-  worker.stdin.write(JSON.stringify({ cmd: "models" }) + "\n");
+  engineMessage({ cmd: "models" });
   return { ok: true, snapshot: modelSnapshot };
 });
 
 ipcMain.handle("models:download", async (_event, model) => {
+  ensureEngine();
   if (!worker || !workerReady) return { ok: false, error: "转录引擎未就绪" };
-  worker.stdin.write(JSON.stringify({ cmd: "downloadModel", model }) + "\n");
+  engineMessage({ cmd: "downloadModel", model });
+  return { ok: true };
+});
+
+ipcMain.handle("models:pause", async (_event, model) => {
+  ensureEngine();
+  if (!worker || !workerReady) return { ok: false, error: "转录引擎未就绪" };
+  engineMessage({ cmd: "pauseDownload", model });
   return { ok: true };
 });
 
 ipcMain.handle("transcribe:start", async (_event, options) => {
+  ensureEngine();
   if (!worker || !workerReady) {
-    return { ok: false, error: "转录引擎未就绪，请确认 Python 环境已安装" };
+    return { ok: false, error: "转录引擎未就绪，请稍候重试" };
   }
   const id = nextRequestId++;
   const { file, model, language, prompt } = options || {};
@@ -319,8 +453,9 @@ ipcMain.handle("transcribe:start", async (_event, options) => {
     },
   });
 
-  // Announce the request BEFORE writing to the worker: IPC messages are ordered,
-  // so the renderer always binds requestId -> file before any segment arrives.
+  // Announce the request BEFORE handing it to the engine: IPC messages are
+  // ordered, so the renderer always binds requestId -> file before any segment
+  // arrives.
   sendToRenderer("transcribe:event", {
     type: "started",
     requestId: id,
@@ -329,18 +464,14 @@ ipcMain.handle("transcribe:start", async (_event, options) => {
     language,
   });
 
-  worker.stdin.write(
-    JSON.stringify({ cmd: "transcribe", id, file, model, language, prompt }) + "\n"
-  );
+  engineMessage({ cmd: "transcribe", id, file, model, language, prompt });
   return { ok: true, requestId: id };
 });
 
 ipcMain.handle("transcribe:cancel", async (_event, requestId) => {
   if (!worker || !workerReady) return { ok: false };
   const id = nextRequestId++;
-  worker.stdin.write(
-    JSON.stringify({ cmd: "cancel", id, target: requestId }) + "\n"
-  );
+  engineMessage({ cmd: "cancel", id, target: requestId });
   return { ok: true };
 });
 

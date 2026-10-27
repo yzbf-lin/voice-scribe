@@ -19,6 +19,7 @@ declare global {
       workerStatus: () => Promise<WorkerStatus>;
       listModels: () => Promise<{ ok: boolean; error?: string; snapshot: ({ type: "models" } & ModelsSnapshot) | null }>;
       downloadModel: (model: string) => Promise<{ ok: boolean; error?: string }>;
+      pauseDownload: (model: string) => Promise<{ ok: boolean; error?: string }>;
       onModelEvent: (handler: (event: ModelEvent) => void) => () => void;
       devReplay: () => Promise<{ file: string; language?: string; segments: Segment[] } | null>;
       openMedia: () => Promise<string | null>;

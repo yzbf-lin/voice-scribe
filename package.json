@@ -1,19 +1,29 @@
 {
   "name": "voice-scribe",
   "private": true,
-  "version": "1.0.0",
-  "description": "Local-first video/audio to text desktop app powered by faster-whisper",
+  "version": "0.1.0",
+  "description": "Local-first video/audio to text desktop app powered by whisper.cpp",
   "main": "electron/main.js",
   "scripts": {
-    "dev": "concurrently -k -n VITE,APP -c cyan,magenta \"vite\" \"wait-on tcp:5173 && cross-env NODE_ENV=development node scripts/launch-electron.js\"",
-    "dev:nosandbox": "concurrently -k -n VITE,APP -c cyan,magenta \"vite\" \"wait-on tcp:5173 && cross-env NODE_ENV=development VS_NO_SANDBOX=1 node scripts/launch-electron.js\"",
+    "dev": "concurrently -k -n VITE,APP -c cyan,magenta \"vite\" \"wait-on tcp:${VITE_PORT:-5180} && cross-env NODE_ENV=development node scripts/launch-electron.js\"",
+    "dev:nosandbox": "concurrently -k -n VITE,APP -c cyan,magenta \"vite\" \"wait-on tcp:${VITE_PORT:-5180} && cross-env NODE_ENV=development VS_NO_SANDBOX=1 node scripts/launch-electron.js\"",
     "dev:renderer": "vite",
     "build": "tsc --noEmit && vite build",
     "start": "npm run build && cross-env NODE_ENV=production node scripts/launch-electron.js",
-    "setup:python": "bash scripts/setup-python.sh",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "icons": "python3 scripts/make-icons.py",
+    "pack": "npm run build && electron-builder --dir",
+    "dist:mac": "npm run prep:mac && npm run build && electron-builder --mac",
+    "dist:win": "npm run prep:win && npm run build && electron-builder --win",
+    "dist": "npm run prep:mac && npm run prep:win && npm run build && electron-builder --mac --win",
+    "prep:win": "node scripts/prepare-platform-deps.js win32-x64",
+    "prep:mac": "node scripts/prepare-platform-deps.js darwin-arm64 darwin-x64"
   },
   "dependencies": {
+    "@fugood/whisper.node": "^1.2.0-rc.1",
+    "ffmpeg-static": "^5.3.0"
+  },
+  "devDependencies": {
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
@@ -24,28 +34,132 @@
     "@radix-ui/react-slot": "^1.1.1",
     "@radix-ui/react-tabs": "^1.1.2",
     "@radix-ui/react-tooltip": "^1.1.6",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^34.0.0",
+    "electron-builder": "^26.18.0",
     "lucide-react": "^0.469.0",
     "motion": "^14.6.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-resizable-panels": "^4.14.8",
     "tailwind-merge": "^2.6.0",
-    "zustand": "^5.0.16"
-  },
-  "devDependencies": {
-    "@tailwindcss/vite": "^4.3.3",
-    "@types/react": "^18.3.18",
-    "@types/react-dom": "^18.3.5",
-    "@vitejs/plugin-react": "^4.3.4",
-    "concurrently": "^9.1.2",
-    "cross-env": "^7.0.3",
-    "electron": "^34.0.0",
     "tailwindcss": "^4.3.3",
     "tw-animate-css": "^1.4.0",
     "typescript": "^5.7.3",
     "vite": "^6.0.7",
-    "wait-on": "^8.0.1"
+    "wait-on": "^8.0.1",
+    "zustand": "^5.0.16"
+  },
+  "author": {
+    "name": "yzbf-lin"
+  },
+  "build": {
+    "appId": "com.yzbflin.voicescribe",
+    "productName": "VoiceScribe",
+    "copyright": "Copyright © 2026 yzbf-lin",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "package.json",
+      "!src/**",
+      "!docs/**",
+      "!scripts/**",
+      "!sample-output/**",
+      "!build/**",
+      "!.cache/**",
+      "!.workbuddy-ai/**",
+      "!.service-console.json",
+      "!README.md",
+      "!index.html",
+      "!tsconfig*.json",
+      "!vite.config.ts",
+      "!release/**",
+      "!**/*.map"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node",
+      "node_modules/ffmpeg-static/**",
+      "electron/engine/**"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "darkModeSupport": true,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "VoiceScribe 只在本机读取音频文件，不使用麦克风。",
+        "NSLocalNetworkUsageDescription": "VoiceScribe 需要联网下载 Whisper 模型。"
+      },
+      "identity": null
+    },
+    "dmg": {
+      "title": "VoiceScribe ${version}",
+      "contents": [
+        {
+          "x": 140,
+          "y": 200,
+          "type": "file"
+        },
+        {
+          "x": 400,
+          "y": 200,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "shortcutName": "VoiceScribe"
+    },
+    "publish": null,
+    "afterPack": "scripts/after-pack.js"
   }
 }

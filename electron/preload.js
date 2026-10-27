@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld("voiceScribe", {
 
   downloadModel: (model) => ipcRenderer.invoke("models:download", model),
 
+  pauseDownload: (model) => ipcRenderer.invoke("models:pause", model),
+
   onModelEvent: (handler) => {
     const listener = (_event, payload) => handler(payload);
     ipcRenderer.on("model:event", listener);

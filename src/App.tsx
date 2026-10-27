@@ -134,9 +134,9 @@ function Workspace() {
 
           {worker && !worker.available && (
             <div className="mx-3 mb-3 rounded-lg border border-destructive/20 bg-destructive/5 p-2.5">
-              <p className="text-[11px] font-medium text-destructive">未检测到 Python 环境</p>
+              <p className="text-[11px] font-medium text-destructive">转录引擎已退出</p>
               <p className="mt-0.5 text-[10.5px] leading-4 text-muted-foreground">
-                在项目根目录执行 <code className="font-mono">npm run setup:python</code> 后重启应用。
+                {worker.hint || "重启应用即可恢复。"}
               </p>
             </div>
           )}

@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, ChevronDown, CloudDownload, Cpu, Loader2, TriangleAlert } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  CloudDownload,
+  Cpu,
+  Loader2,
+  Pause,
+  Play,
+  TriangleAlert,
+} from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import {
@@ -9,7 +18,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Progress } from "@/components/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, formatClock } from "@/lib/format";
 import { MODEL_HINTS, MODEL_ORDER, modelLabel } from "@/lib/models";
 import { cn } from "@/lib/utils";
 import { useScribeStore } from "@/store/useScribeStore";
@@ -24,6 +33,7 @@ function ModelRow({
   locked,
   onSelect,
   onDownload,
+  onPause,
 }: {
   name: string;
   info?: ModelInfo;
@@ -33,10 +43,12 @@ function ModelRow({
   locked: boolean;
   onSelect: () => void;
   onDownload: () => void;
+  onPause: () => void;
 }) {
   const label = modelLabel(name);
   const downloaded = info?.downloaded ?? false;
   const percent = Math.round((download?.percent ?? 0) * 100);
+  const paused = Boolean(download?.paused);
   const size = downloaded ? info?.sizeBytes : download?.total || info?.expectedBytes;
 
   return (
@@ -57,11 +69,42 @@ function ModelRow({
         <span className="text-[0.8rem] font-medium">{label}</span>
         {active && <Check className="size-3 text-brand" strokeWidth={2.6} />}
         <span className="ml-auto flex items-center gap-1.5">
-          {download ? (
-            <Badge variant="brand" className="gap-1 tabular">
-              <Loader2 className="size-2.5 animate-spin" />
-              {percent}%
-            </Badge>
+          {download && !paused ? (
+            <>
+              <Badge variant="brand" className="gap-1 tabular">
+                <Loader2 className="size-2.5 animate-spin" />
+                {percent}%
+              </Badge>
+              <button
+                type="button"
+                aria-label={`暂停下载 ${label} 模型`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onPause();
+                }}
+                className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-background hover:text-brand"
+              >
+                <Pause className="size-3.5" />
+              </button>
+            </>
+          ) : paused ? (
+            <>
+              <Badge variant="outline" className="gap-1 tabular">
+                <Pause className="size-2.5" />
+                已暂停 {percent}%
+              </Badge>
+              <button
+                type="button"
+                aria-label={`继续下载 ${label} 模型`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onDownload();
+                }}
+                className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-background hover:text-brand"
+              >
+                <Play className="size-3.5" />
+              </button>
+            </>
           ) : error ? (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -108,7 +151,13 @@ function ModelRow({
             {download.total
               ? `${formatBytes(download.downloaded)} / ${formatBytes(download.total)}`
               : formatBytes(download.downloaded)}
-            {download.speed ? ` · ${formatBytes(download.speed)}/s` : ""}
+            {paused
+              ? " · 已暂停"
+              : download.speed
+                ? ` · ${formatBytes(download.speed)}/s${
+                    download.etaSeconds ? ` · 剩余 ${formatClock(download.etaSeconds)}` : ""
+                  }`
+                : ""}
           </span>
         </div>
       )}
@@ -125,6 +174,7 @@ export function ModelMenu() {
   const cacheDir = useScribeStore((s) => s.cacheDir);
   const refreshModels = useScribeStore((s) => s.refreshModels);
   const downloadModel = useScribeStore((s) => s.downloadModel);
+  const pauseDownload = useScribeStore((s) => s.pauseDownload);
   const isBusy = useScribeStore((s) => s.files.some((f) => f.phase === "transcribing"));
   const [open, setOpen] = useState(false);
 
@@ -161,14 +211,23 @@ export function ModelMenu() {
             open && "bg-muted/60"
           )}
         >
-          {currentDownload ? (
+          {currentDownload && !currentDownload.paused ? (
             <Loader2 className="size-3.5 shrink-0 animate-spin text-brand" />
+          ) : currentDownload?.paused ? (
+            <Pause className="size-3.5 shrink-0 text-muted-foreground" />
           ) : (
             <Cpu className="size-3.5 shrink-0 text-muted-foreground" />
           )}
           <span className="font-medium">{modelLabel(model)}</span>
           {currentDownload ? (
-            <span className="tabular text-[10px] text-brand">{currentPercent}%</span>
+            <span
+              className={cn(
+                "tabular text-[10px]",
+                currentDownload.paused ? "text-muted-foreground" : "text-brand"
+              )}
+            >
+              {currentDownload.paused ? `已暂停 ${currentPercent}%` : `${currentPercent}%`}
+            </span>
           ) : current && !current.downloaded ? (
             <CloudDownload className="size-3 text-muted-foreground/70" />
           ) : null}
@@ -208,6 +267,7 @@ export function ModelMenu() {
               if (info && !info.downloaded && !downloads[name]) void downloadModel(name);
             }}
             onDownload={() => void downloadModel(name)}
+            onPause={() => void pauseDownload(name)}
           />
         ))}
 

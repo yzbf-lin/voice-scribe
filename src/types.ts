@@ -42,7 +42,11 @@ export interface ModelDownload {
   total: number;
   percent: number;
   speed: number;
+  /** Seconds left, when the speed estimate is stable enough to be useful. */
+  etaSeconds?: number | null;
   startedAt?: number;
+  /** True when the user stopped the download; bytes stay on disk, resumable. */
+  paused?: boolean;
 }
 
 export interface ModelInfo {
@@ -79,9 +83,10 @@ export type WorkerEvent =
 
 export type ModelEvent =
   | ({ type: "models" } & ModelsSnapshot)
-  | { type: "model:start"; model: string; total: number }
+  | { type: "model:start"; model: string; total: number; downloaded?: number; percent?: number }
   | ({ type: "model:progress"; model: string } & ModelDownload)
   | { type: "model:done"; model: string; sizeBytes: number; cached?: boolean }
+  | { type: "model:paused"; model: string } & ModelDownload
   | { type: "model:error"; model: string; message: string };
 
 export interface ExportPayload {
