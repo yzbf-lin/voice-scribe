@@ -5,6 +5,21 @@
 
 也支持把 **chatlog 导出的微信聊天记录 JSON** 直接拖进来，批量转写里面的语音消息并原地替换成文字。
 
+## 下载
+
+最新版见 [Releases](https://github.com/yzbf-lin/voice-scribe/releases)。
+
+| 平台 | 文件 |
+| --- | --- |
+| macOS（Apple Silicon / M 系列） | `VoiceScribe-0.1.0-arm64.dmg` |
+| macOS（Intel） | `VoiceScribe-0.1.0.dmg` |
+| Windows x64 | `VoiceScribe.Setup.0.1.0.exe` |
+
+安装包**没有代码签名**，首次打开需手动放行一次：macOS 把 App 拖进「应用程序」后执行
+`xattr -dr com.apple.quarantine /Applications/VoiceScribe.app`；Windows 在 SmartScreen 提示时点
+「更多信息」→「仍要运行」。模型不随包分发，首次使用时在应用内下载（`small` 约 465 MB，
+支持暂停与断点续传）。
+
 ## 技术栈
 
 | 层 | 选型 |
@@ -113,8 +128,16 @@ npm run dist:mac    # dmg + zip，arm64 / x64
 npm run dist:win    # nsis 安装包 + zip
 ```
 
-产物命名：`VoiceScribe-0.1.0-arm64.dmg`、`VoiceScribe-0.1.0.dmg`（Intel）、
-`VoiceScribe Setup 0.1.0.exe`。
+产物命名（0.1.0 实测）：
+
+| 平台 | 文件 | 大小 |
+|---|---|---|
+| macOS Apple Silicon | `VoiceScribe-0.1.0-arm64.dmg` | 119 MB |
+| macOS Intel | `VoiceScribe-0.1.0.dmg` | 129 MB |
+| Windows x64 | `VoiceScribe.Setup.0.1.0.exe` | 108 MB |
+
+另外三个 `*.zip` 是免安装版（解压即用），文件名分别是
+`VoiceScribe-0.1.0-arm64-mac.zip` / `VoiceScribe-0.1.0-mac.zip` / `VoiceScribe-0.1.0-win.zip`。
 
 **关于签名**：仓库没有 Developer ID 证书，所以 macOS 产物是 ad-hoc 签名、Windows 产物未签名。
 首次打开需要手动放行一次（Release 说明里也写了）：
@@ -126,8 +149,39 @@ xattr -dr com.apple.quarantine /Applications/VoiceScribe.app
 
 Windows 上 SmartScreen 提示时点「更多信息」→「仍要运行」。
 
-打包时 `scripts/after-pack.js` 会把 ffmpeg 换成目标架构那一份，并删掉其它平台的
-`node-whisper-*` 绑定——否则 Intel 包会带上 arm64 的 ffmpeg，一启动就 `bad CPU type`。
+### 打包时踩过的坑
+
+这几个问题**只在打包产物里出现**，`npm run dev` 永远碰不到，所以发布前必须实跑一次安装包：
+
+1. **`spawn ENOTDIR`（ffmpeg 找不到）** —— `ffmpeg-static` 用 `__dirname` 拼路径，打包后指向
+   `app.asar` 里面。asar 是一个文件不是目录，`spawn` 它必然失败。`audio.js` 里把路径里的
+   `app.asar/` 改写成 `app.asar.unpacked/`。
+2. **引擎进程起不来** —— `utilityProcess.fork` 需要磁盘上真实存在的文件，不能从 asar 里拉子进程。
+   `main.js` 的 `engineEntry()` 同样改走 `app.asar.unpacked/electron/engine/worker.js`。
+3. **`MODULE_NOT_FOUND: @fugood/whisper.node`** —— 引擎被解包到 `app.asar.unpacked` 之后，
+   Node 从那个目录**向上**找 `node_modules`，永远看不到 asar 里的依赖。而且 Electron 的
+   utilityProcess **不认 `NODE_PATH`**，光在主进程塞环境变量没用；得在 `worker.js` 里
+   把 asar 的 `node_modules` 加进 `NODE_PATH` 并调 `Module._initPaths()`，让 `transcriber.js`
+   的 `require` 也能走这条路径（只改 `module.paths` 不够，那只影响 worker.js 自己）。
+
+还有一个纯配置陷阱：**平台级 `mac.files` 会整体替换顶层 `files`，不是合并**。写一句
+`mac.files: ["!node_modules/@fugood/node-whisper-win32-*/**"]` 当排除规则，结果等于放开整个项目，
+连 `.cache/`（106 MB 构建缓存）、`src/`、`docs/` 全进了 asar，包从 19 MB 涨到 114 MB。
+跨平台裁剪现在放在 `scripts/after-pack.js` 里做——它同时负责把 ffmpeg 换成目标架构那一份，
+并删掉其它平台的 `node-whisper-*` 绑定（否则 Intel 包会带上 arm64 的 ffmpeg，一启动就
+`bad CPU type`）。在原生 runner 上这两步都是空操作，`npm ci` 装出来本来就是对的。
+
+### 发布前验证
+
+0.1.0 的产物是逐项验过的，不是"构建成功"就算完：
+
+- 三个包的 SHA256 与 GitHub Release 记录的 `digest` 逐一比对一致
+- 挂载 dmg 实跑：引擎就绪 → probe 出 `0:05 · PCM_S16BE` → 2 段转录正确
+- Intel 包内主程序、ffmpeg、whisper 绑定全是 `x86_64`；Windows 包内 `ffmpeg.exe` 是 PE32+ x86-64，
+  且只带 `node-whisper-win32-x64`
+
+> 网络不稳时 `gh release download` 会截断（本次遇到两次），脚本里请用 `curl -C -` 续传后
+> 再比 SHA256，别只看文件大小对不对。
 
 ## 使用
 
@@ -273,3 +327,8 @@ Windows 上 SmartScreen 提示时点「更多信息」→「仍要运行」。
 被替换为文字、1 条 0:00 静音语音保留原文，非语音消息与键结构零改动。
 合并视图实测：13 条按时间铺成一篇，`复制全部` 得到 2736 字节的整段对话；
 TXT / MD / SRT / JSON 四种合并产物结构均校验通过（SRT 时间轴按队列顺序连续累加）。
+
+发布产物（v0.1.0）实测：macOS arm64 / Intel 两个 dmg 与 Windows 安装包的 SHA256 均与
+GitHub 记录的 digest 一致；arm64 dmg 挂载后实跑完成一次完整转录；Intel 包内主程序、
+ffmpeg、whisper 绑定全部是 `x86_64`；Windows 包内 `ffmpeg.exe` 为 PE32+ x86-64，
+且只带 `node-whisper-win32-x64`。
